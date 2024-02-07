@@ -1,11 +1,18 @@
-#!/usr/bin/env python
-
 import numpy as np
 import cv2 as cv
 import argparse
 import json
 import sys
 import random
+
+
+def dump_calibration(intrinsic_matrix: np.ndarray, roi: tuple[int, int, int, int]) -> None:
+    sys.stdout.write(f'{json.dump({
+        'intrinsics': intrinsic_matrix,
+        'roi': roi,
+    })}\n')
+
+
 def calibrate(video_path: str, show: bool, num_frames: int) -> None:
     #termination criteria
     CRITERIA = (cv.TERM_CRITERIA_EPS + cv.TERM_CRITERIA_MAX_ITER, 30, 0.001)
@@ -67,7 +74,7 @@ def calibrate(video_path: str, show: bool, num_frames: int) -> None:
         sys.exit(1)
 
     # Calibrate the camera
-    _, mtx, dist, _, _ = cv.calibrateCamera(
+    ret, mtx, dist, rvecs, tvecs = cv.calibrateCamera(
         objpoints,
         imgpoints,
         gray.shape[::-1],
@@ -76,7 +83,7 @@ def calibrate(video_path: str, show: bool, num_frames: int) -> None:
     )
 
     # Get the optimal new camera matrix
-    intrinsic_matrix, _ = cv.getOptimalNewCameraMatrix(
+    intrinsic_matrix, roi = cv.getOptimalNewCameraMatrix(
         mtx,
         dist,
         (frame.shape[1], frame.shape[0]),  # Use the frame width and height
@@ -84,8 +91,7 @@ def calibrate(video_path: str, show: bool, num_frames: int) -> None:
         (0, 0),
     )
 
-    sys.stdout.write(f'{intrinsic_matrix}\n')
-    #sys.stdout.write(f'{json.dump(intrinsic_matrix)}\n')
+    dump_calibration(intrinsic_matrix, roi)
 
 
 if __name__ == '__main__':
