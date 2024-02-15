@@ -1,118 +1,120 @@
+from typing import TypeAlias, Optional, Tuple, List, Self
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass
+from pathlib import Path
+
+import multiprocessing as mp
 import numpy as np
 import cv2 as cv
 import argparse
 import json
 import sys
-import random
 
 
-def dump_calibration(intrinsic_matrix: np.ndarray, roi: tuple[int, int, int, int]) -> None:
-    sys.stdout.write(f'{json.dump({
-        'intrinsics': intrinsic_matrix,
-        'roi': roi,
-    })}\n')
+CornerResult: TypeAlias = Optional[Tuple[np.ndarray, np.ndarray]]
 
 
-def calibrate(video_path: str, show: bool, num_frames: int) -> None:
-    #termination criteria
-    CRITERIA = (cv.TERM_CRITERIA_EPS + cv.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+CRITERIA = (cv.TERM_CRITERIA_EPS + cv.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+OBJP = np.zeros((6*7, 3), np.float32)
+OBJP[:, :2] = np.mgrid[0:7, 0:6].T.reshape(-1, 2)
 
-    # prepare object points, like (0,0,0), (1,0,0), (2,0,0) ....,(6,5,0)
-    objp = np.zeros((6*7,3), np.float32)
-    objp[:,:2] = np.mgrid[0:7,0:6].T.reshape(-1,2)
 
-    # Arrays to store object points and image points from sampled frames.
-    objpoints = [] # 3d point in real world space
-    imgpoints = [] # 2d points in image plane.
+@dataclass(frozen=True)
+class Calibration:
+    intrinsic: np.ndarray
+    distortion: np.ndarray
+    rvecs: np.ndarray
+    tvecs: np.ndarray
+    roi: Tuple[int, int, int, int]
 
-    cap = cv.VideoCapture(video_path)
 
-    # Get total number of frames in the video
-    total_frames = int(cap.get(cv.CAP_PROP_FRAME_COUNT))
+    @staticmethod
+    def calibrate(objpoints: List[np.ndarray], imgpoints: List[np.ndarray], shape: Tuple[int, int]) -> Optional[Self]:
+        ret, mtx, dist, rvecs, tvecs = cv.calibrateCamera(
+            objpoints,
+            imgpoints,
+            shape,
+            None,
+            None,
+        )
 
-    # Sample random frames
-    sampled_frames = random.sample(range(total_frames), num_frames)
+        if not ret:
+            return None
 
-    frame_count = 0
+        intrinsic, roi = cv.getOptimalNewCameraMatrix(
+            mtx,
+            dist,
+            shape,
+            1,
+            (0, 0),
+        )
 
-    while True:
+        return Calibration(intrinsic, dist, rvecs, tvecs, roi)
+
+
+    @staticmethod
+    def find_corners(frame: np.ndarray) -> CornerResult:
+        gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+        ret, corners = cv.findChessboardCorners(gray, (7, 6), None)
+
+        if not ret:
+            return None
+
+        corners = cv.cornerSubPix(gray, corners, (11, 11), (-1, -1), CRITERIA)
+
+        return OBJP, corners
+    
+
+    def dump(self) -> str:
+        return json.dumps({
+            "intrinsic_matrix": self.intrinsic.tolist(),
+            "distortion_coefficients": self.distortion.tolist(),
+            "roi": self.roi,
+            "rvecs": [rvec.tolist() for rvec in self.rvecs],
+            "tvecs": [tvec.tolist() for tvec in self.tvecs],
+        }, indent=2)
+
+
+def load_video(path: Path) -> np.ndarray:
+    cap = cv.VideoCapture(str(path))
+    
+    frames = []
+    while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
 
-        if frame_count not in sampled_frames:
-            frame_count += 1
-            continue
-
-        gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
-
-        # Find the chess board corners
-        ret, corners = cv.findChessboardCorners(gray, (7,6), None)
-
-        if ret is False:
-            sys.stderr.write('Chessboard corners not found in frame\n')
-            continue
-        
-        # If found, add object points, image points (after refining them)
-        objpoints.append(objp)
-        corners2 = cv.cornerSubPix(gray,corners, (11,11), (-1,-1), CRITERIA)
-        imgpoints.append(corners2)
-
-        if show:
-            cv.drawChessboardCorners(frame, (7,6), corners2, ret)
-            cv.imshow('frame', frame)
-            if cv.waitKey(1) & 0xFF == ord('q'):
-                break
-
-        frame_count += 1
+        if frame is not None:
+            frames.append(frame)
 
     cap.release()
-    cv.destroyAllWindows()
 
-    if len(objpoints) == 0:
+    return np.array(frames)
+
+
+def main(video_path: Path) -> None:
+    video = load_video(video_path)
+
+    with ProcessPoolExecutor(max_workers=mp.cpu_count()) as executor:
+        results = list(executor.map(Calibration.find_corners, video))
+
+    objpoints = [result[0] for result in results if result is not None]
+    imgpoints = [result[1] for result in results if result is not None]
+
+    width, height = video[0].shape[:2]
+    calibration = Calibration.calibrate(objpoints, imgpoints, (width, height))
+
+    if calibration:
+        sys.stdout.write(calibration.dump())
+    else:
         sys.stderr.write('No chessboard corners found in the sampled frames\n')
         sys.exit(1)
 
-    # Calibrate the camera
-    ret, mtx, dist, rvecs, tvecs = cv.calibrateCamera(
-        objpoints,
-        imgpoints,
-        gray.shape[::-1],
-        None,
-        None,
-    )
-
-    # Get the optimal new camera matrix
-    intrinsic_matrix, roi = cv.getOptimalNewCameraMatrix(
-        mtx,
-        dist,
-        (frame.shape[1], frame.shape[0]),  # Use the frame width and height
-        1,
-        (0, 0),
-    )
-
-    dump_calibration(intrinsic_matrix, roi)
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Camera calibration')
-    parser.add_argument(
-        'video',
-        metavar='video',
-        type=str,
-        help='input video path',
-    )
-    parser.add_argument(
-        '--show',
-        action='store_true',
-        help='display the results of the calibration',
-    )
-    parser.add_argument(
-        '--num-frames',
-        type=int,
-        default=10,
-        help='number of frames to sample from the video',
-    )
+    parser = argparse.ArgumentParser(description='Calibrate a camera using a video of a chessboard')
+    parser.add_argument('video', type=Path, help='Path to the video file')
     args = parser.parse_args()
 
-    calibrate(args.video, args.show, args.num_frames)
+    main(args.video)
