@@ -1,4 +1,4 @@
-from typing import Self
+from typing import Self, Tuple
 from enum import Enum
 
 import open3d as o3d
@@ -27,7 +27,7 @@ class Model(Enum):
         return Model[name.capitalize()]
 
 
-def init(type: Model) -> (torch.device, torch.nn.Module, torch.nn.Transformer):
+def init(type: Model) -> Tuple[torch.device, torch.nn.Module, torch.nn.Transformer]:
     assert torch.cuda.is_available()
 
     device = torch.device('cuda:0')
