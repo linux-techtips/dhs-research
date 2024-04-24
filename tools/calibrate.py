@@ -8,19 +8,18 @@ Note: This tool requires a physical print of an OpenCV chessboard pattern. More 
 '''
 
 
-from typing import Generator, Optional, Tuple, List, Self, Any
+from typing import Generator, Optional, Tuple, List
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from tqdm import tqdm
+from tqdm import tqdm # type : ignore[untyped-import]
 
 import multiprocessing as mp
 import numpy as np
 import cv2 as cv
 import argparse
-import asyncio
 import random
 import json
 
@@ -39,7 +38,7 @@ class Calibration:
     roi: Tuple[int, int, int, int]
 
     @staticmethod
-    def calibrate(objpoints: List[np.ndarray], imgpoints: List[np.ndarray], shape: Tuple[int, int]) -> Optional[Self]:
+    def calibrate(objpoints: List[np.ndarray], imgpoints: List[np.ndarray], shape: Tuple[int, int]) -> Optional['Calibration']:
         ret, mtx, dist, rvecs, tvecs = cv.calibrateCamera(
             objpoints,
             imgpoints,
@@ -74,7 +73,7 @@ class Calibration:
 
 
     @staticmethod
-    def load(path: Path) -> Self:
+    def load(path: Path) -> 'Calibration':
         with path.open('r') as file:
             data = json.load(file)
 
@@ -103,10 +102,18 @@ class Calibration:
     
 
     def undistort(self, frame: np.ndarray) -> np.ndarray:
+        '''
+        Undistorts a given frame based off of the calibration's distortion coefficent.
+        '''
+        
         return cv.undistort(frame, self.matrix, self.distortion, None, self.intrinsic)
 
 
     def rectify(self, frame: np.ndarray) -> np.ndarray:
+        '''
+        Crops the image to the region of interest (ROI) of the calibration. This will be useful for depth prediction.
+        '''
+        
         x, y, w, h = self.roi
         return frame[y:y+h, x:x+w]
     
@@ -124,7 +131,8 @@ class Calibration:
     
 
 @contextmanager
-def capture(*args, **kwargs) -> Generator[cv.VideoCapture, None, None]:
+def Capture(*args, **kwargs) -> Generator[cv.VideoCapture, None, None]:
+    # why is this not built into OpenCV??
     cap = cv.VideoCapture(*args, **kwargs)
     try:
         yield cap
@@ -142,6 +150,7 @@ def capture_triple(cap: cv.VideoCapture) -> Tuple[int, int, int]:
 
 
 def stream(cap: cv.VideoCapture) -> Generator[np.ndarray, None, None]:
+    # why is this also not built into OpenCV???
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
@@ -152,21 +161,42 @@ def stream(cap: cv.VideoCapture) -> Generator[np.ndarray, None, None]:
 
 
 def gen_objp(grid_dims: Tuple[int, int], square_width: int) -> List[np.ndarray]:
+    '''
+    Generates the list of points for a physical chessboard pattern.
+    Since we know the grid dimensions and the size of each square, we can generate mappings in which 
+    to relate the physical imgpoints to.
+    '''
+
     objp = np.zeros((np.prod(grid_dims), 3), np.float32)
     objp[:, :2] = np.indices(grid_dims).T.reshape(-1, 2) * square_width
 
     return objp
 
 
-def calibrate(args: object) -> Optional[Calibration]:
-    with ProcessPoolExecutor(max_workers=mp.cpu_count()) as executor, capture(str(args.input)) as cap:
+def show_results(calibration: Calibration, frame: np.ndarray) -> None:
+    undistorted = calibration.undistort(frame)
+    rectified = calibration.rectify(undistorted)
+
+    cv.imshow('Original', frame)
+    cv.imshow('Undistorted', undistorted)
+    cv.imshow('Rectified', rectified)
+
+    cv.waitKey(0)
+    cv.destroyAllWindows()
+
+
+def calibrate(args: object) -> None:
+    with ProcessPoolExecutor(max_workers=mp.cpu_count()) as executor, Capture(str(args.input)) as cap:
         count, width, height = capture_triple(cap)
+        frames = list(stream(cap))
 
         objp = gen_objp(args.grid_dims, args.square_width)
-        applicative = partial(Calibration.find_corners, objp, args.grid_dims)
+        applicative = partial(Calibration.find_corners, objp, args.grid_dims) # performing partial application in case generating objpoints becomes more novel
 
-        corners = tqdm(executor.map(applicative, stream(cap)), total=count, desc='Finding corners')
+        corners = tqdm(executor.map(applicative, frames), total=count, desc='Finding corners')
         objpoints, imgpoints = zip(*[point for point in corners if point is not None])
+
+    # TODO (Carter Vavra): Implement a better sampling method. This is a bit naive.
 
     objsample = random.sample(objpoints, args.sample_amount)
     imgsample = random.sample(imgpoints, args.sample_amount)
@@ -175,17 +205,23 @@ def calibrate(args: object) -> Optional[Calibration]:
     if calibration := Calibration.calibrate(objsample, imgsample, (width, height)):
         print(f'Error: {calibration.error(objpoints, imgpoints)}')
         calibration.dump(args.output)
-        
+
+        if args.show_results:
+            show_results(calibration, random.choice(frames))
+
     else:
         print('[ERROR]: No chessboard corners found in the sampled frames\n')
     
 
 if __name__ == '__main__':
+    # TODO (Carter Vavra): Allow user to specify Calibration Criteria
+
     parser = argparse.ArgumentParser(description='Calibrate a camera using a video of a chessboard')
     parser.add_argument('input', type=Path, help='Path to the video file')
     parser.add_argument('output', type=Path, help='Path to the output file')
     parser.add_argument('--grid-dims', type=int, nargs=2, default=(9, 6), help='Grid dimensions (width height)')
-    parser.add_argument('--square-width', type=float, default=30, help='Width of each square')
+    parser.add_argument('--square-width', type=float, default=30, help='Width of each square in mm')
     parser.add_argument('--sample-amount', type=int, default=30, help='Number of calibration frames to sample')
+    parser.add_argument('--show-results', action='store_true', default=False, help='Show the results of the calibration')
 
     calibrate(parser.parse_args())

@@ -4,3 +4,15 @@ __pycache__/
 *.pyo
 *.pyd
 *.pyw
+*.npy
+*.pyc
+*.mp4
+*.avi
+*.mov
+*.mpg
+*.mpeg
+*.flv
+*.jpg
+*.jpeg
+*.png
+*.gif

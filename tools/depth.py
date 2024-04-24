@@ -43,9 +43,9 @@ class ModelTriple:
         return ModelTriple(device, model.to(device).eval(), transform)
 
 
-def estimate(batch: np.ndarray, triple: ModelTriple) -> np.ndarray:
+def estimate(triple: ModelTriple, batch: np.ndarray) -> np.ndarray:
     input = torch.cat([triple.transform(img) for img in batch]).to(triple.device)
-    
+
     with torch.no_grad():
         pred = triple.model(input)
         pred = torch.nn.functional.interpolate(
@@ -69,29 +69,19 @@ if __name__ == '__main__':
     calibration = Calibration.load(Path('../data/pixel_calibration.json'))
     triple = ModelTriple.from_model(Model.Small)
 
-    print(calibration.error())
-
     img = cv.imread('../data/classroom.jpg')
-    img = cv.cvtColor(img, cv.COLOR_BGR2RGB)
-    cv.imshow('Original', img)
+    img = cv.resize(img, (640, 480))
 
-    img = cv.undistort(img, calibration.matrix, calibration.distortion, None, calibration.intrinsic)
-    cv.imshow('Undistorted', img)
-    cv.waitKey(0)
-    cv.destroyAllWindows()
+    depth = estimate([img], triple)
     
-    x, y, w, h = calibration.roi
-    img = img[y:y+h, x:x+w]
-    cv.imshow('Ropenoi', img)
-    cv.waitKey(0)
-    cv.destroyAllWindows()
-    
-    depth = estimate(np.array([img]), triple)
-    norm = normalize(depth)
+    with open('../data/depth.npy', 'wb') as file:
+        np.save(file, depth)
 
-    # Mask out the ROI
-    roi = calibration.roi
+    depth = normalize(depth)
 
-    cv.imshow('Depth', norm)
-    cv.waitKey(0)
+    cv.namedWindow('Depth', cv.WINDOW_NORMAL)
+    cv.moveWindow('Depth', 0, 0)
+    cv.imshow('Depth', depth)
+    cv.waitKey()
+
     cv.destroyAllWindows()
